@@ -1,0 +1,7 @@
+{
+  "name": "dead-drop-sql",
+  "version": "1.0.0",
+  "description": "1v1 SQL investigation duel: unmask your rival's cover identity before they find yours. Online peer-to-peer or vs a bot.",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
