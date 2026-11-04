@@ -97,7 +97,13 @@ legend{color:#0046d5;padding:0 3px}
 .tab .c:hover{background:#c4401e;color:#fff}
 .tab.add{font-weight:bold;color:#0046d5}
 .page{flex:1;display:flex;flex-direction:column;gap:6px;min-height:0;background:#fcfcfe;border:1px solid #919b9c;border-top:0;padding:6px}
-.editor{min-height:100px;height:130px;resize:vertical;width:100%;font:13px Consolas,"Courier New",monospace;flex:none}
+.edwrap{position:relative;flex:none;background:#fff}
+.editor,.hl{font:13px/1.4 Consolas,"Courier New",monospace;tab-size:4;padding:3px 5px;border:1px solid #7f9db9;margin:0;white-space:pre;letter-spacing:0}
+.editor{display:block;position:relative;z-index:1;min-height:100px;height:130px;resize:vertical;width:100%;background:transparent;color:transparent;caret-color:#000;overflow:auto}
+.editor::selection{background:rgba(49,106,197,.3);color:transparent}
+.hl{position:absolute;left:0;top:0;box-sizing:border-box;overflow:hidden;color:#000;pointer-events:none;border-color:transparent}
+.hl .k{color:#0000ff;font-weight:bold}.hl .f{color:#c000c0}.hl .t{color:#2b91af;font-weight:bold}.hl .c{color:#8a3f00}
+.hl .s{color:#c00000}.hl .n{color:#098658}.hl .m{color:#008000;font-style:italic}.hl .o{color:#666}
 .grid{flex:1;overflow:auto;min-height:80px}
 table{border-collapse:collapse;width:100%;font-size:12px}
 th,td{padding:2px 8px;border-right:1px solid #e0dfe3;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}
@@ -199,7 +205,7 @@ tr:hover td{background:#cfe0fb}
       <div style="flex:1;display:flex;flex-direction:column;min-height:0">
         <div class="tabs" id="tabs"></div>
         <div class="page">
-          <textarea class="editor" id="editor" spellcheck="false"></textarea>
+          <div class="edwrap"><pre class="hl" id="hl" aria-hidden="true"></pre><textarea class="editor" id="editor" spellcheck="false" wrap="off"></textarea></div>
           <div class="grid sunken" id="results"></div>
         </div>
         <div class="status"><span id="qstatus">Ready</span></div>
@@ -409,6 +415,7 @@ function buildDb(w) {
   $('schema').innerHTML = Object.entries(TABLES).map(([t, c]) =>
     `<details><summary>📋 ${t}<span class="open" data-t="${t}">open</span></summary><ul>${c.map(x => `<li>${x.split(' ')[0]} <i>${x.split(' ')[1].toLowerCase()}</i></li>`).join('')}</ul></details>`).join('');
   $('schema').onclick = e => { const t = e.target.dataset.t; if (t) { e.preventDefault(); openTableViewer(t); } };
+  refreshSchemaNames(); if ($('hl')) highlight();
 }
 
 function renderResult(r) {
@@ -427,7 +434,7 @@ function newTab(sql = '') {
 function saveTab() { if (cur >= 0) { tabs[cur].sql = $('editor').value; } }
 function loadTab() {
   const t = tabs[cur];
-  $('editor').value = t.sql; $('results').innerHTML = t.html; $('qstatus').innerHTML = t.status;
+  $('editor').value = t.sql; highlight(); $('results').innerHTML = t.html; $('qstatus').innerHTML = t.status;
   $('tabs').innerHTML = tabs.map((t, i) => `<div class="tab${i === cur ? ' on' : ''}" data-i="${i}">📝 ${esc(t.name)}${tabs.length > 1 ? `<span class="c" data-x="${i}" title="Close tab">✕</span>` : ''}</div>`).join('')
     + '<div class="tab add" data-add="1" title="New query tab">＋</div>';
   $('editor').focus();
@@ -453,8 +460,56 @@ function run() {
     t.status = `${n} row${n === 1 ? '' : 's'} returned · ${(performance.now() - t0).toFixed(1)} ms${n > 1000 ? ' · showing first 1000' : ''}`;
   } catch (e) { t.html = `<div class="msg" style="color:var(--red)">Error: ${esc(e.message)}</div>`; t.status = '<span class="bad">Query failed</span>'; }
   $('results').innerHTML = t.html; $('qstatus').innerHTML = t.status;
+  refreshSchemaNames(); highlight();
 }
 $('run').onclick = run;
+// ---------- syntax highlighting ----------
+const SQL_KW = new Set(('SELECT FROM WHERE AND OR NOT IN IS NULL LIKE GLOB BETWEEN JOIN INNER LEFT RIGHT FULL OUTER CROSS NATURAL ON USING AS '
+  + 'GROUP BY ORDER HAVING LIMIT OFFSET ASC DESC DISTINCT ALL UNION INTERSECT EXCEPT CASE WHEN THEN ELSE END EXISTS '
+  + 'INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW INDEX DROP ALTER ADD COLUMN IF PRIMARY KEY WITH RECURSIVE '
+  + 'INTEGER TEXT REAL BLOB NUMERIC TRUE FALSE COLLATE NOCASE ESCAPE PRAGMA TEMP TEMPORARY').split(' '));
+const SQL_FN = new Set(('COUNT SUM AVG MIN MAX TOTAL GROUP_CONCAT LOWER UPPER LENGTH SUBSTR SUBSTRING TRIM LTRIM RTRIM REPLACE INSTR '
+  + 'ROUND ABS COALESCE IFNULL NULLIF CAST PRINTF FORMAT RANDOM TYPEOF DATE TIME DATETIME STRFTIME UNICODE CHAR HEX').split(' '));
+let tableNames = new Set(), columnNames = new Set();
+function refreshSchemaNames() {
+  if (!db) return;
+  try {
+    const t = db.exec("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'");
+    tableNames = new Set((t[0]?.values || []).map(r => r[0].toLowerCase()));
+    columnNames = new Set();
+    for (const n of tableNames) for (const r of (db.exec(`PRAGMA table_info("${n.replace(/"/g, '""')}")`)[0]?.values || [])) columnNames.add(String(r[1]).toLowerCase());
+  } catch { }
+}
+const TOKEN_RE = /(--[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|('(?:[^']|'')*'?)|("(?:[^"]|"")*"?|`[^`]*`?|\[[^\]]*\]?)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|([<>=!]=?|<>|\|\||[-+*\/%(),.;])/g;
+function highlightSql(src) {
+  let out = '', last = 0, m;
+  TOKEN_RE.lastIndex = 0;
+  while ((m = TOKEN_RE.exec(src))) {
+    out += esc(src.slice(last, m.index)); last = TOKEN_RE.lastIndex;
+    const tok = esc(m[0]); let cls = '';
+    if (m[1]) cls = 'm'; else if (m[2]) cls = 's'; else if (m[4]) cls = 'n'; else if (m[6]) cls = 'o';
+    else {
+      const name = (m[3] ? m[3].slice(1, -1) : m[5]).toLowerCase(), up = m[5] && m[5].toUpperCase();
+      if (up && SQL_KW.has(up)) cls = 'k';
+      else if (up && SQL_FN.has(up) && /^\s*\(/.test(src.slice(last))) cls = 'f';
+      else if (tableNames.has(name)) cls = 't';
+      else if (columnNames.has(name)) cls = 'c';
+    }
+    out += cls ? `<span class="${cls}">${tok}</span>` : tok;
+  }
+  return out + esc(src.slice(last)) + '\n';
+}
+function syncHl() {
+  // Match the overlay to the textarea's inner area (excluding its scrollbars) so both scroll the same distance.
+  const ed = $('editor'), hl = $('hl');
+  hl.style.width = (ed.clientWidth + 2) + 'px'; hl.style.height = (ed.clientHeight + 2) + 'px';
+  hl.scrollTop = ed.scrollTop; hl.scrollLeft = ed.scrollLeft;
+}
+function highlight() { $('hl').innerHTML = highlightSql($('editor').value); syncHl(); }
+$('editor').addEventListener('input', highlight);
+$('editor').addEventListener('scroll', syncHl);
+new ResizeObserver(syncHl).observe($('editor'));
+
 $('editor').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } };
 
 // ---------- table viewer windows ----------
